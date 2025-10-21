@@ -1,7 +1,7 @@
 import cv2
 import datetime
 from detection.pedestrian_vehicle_detector import PedestrianVehicleDetector
-from tracking.object_tracker import SORTTracker
+from tracking.object_tracker import DepthAIObjectTracker
 from tracking.line_crossing import LineCrossingDetector
 from logs.logger import DetectionLogger
 from utils.config import Config
@@ -9,7 +9,7 @@ from utils.config import Config
 # Initialize system components
 config = Config()
 detector = PedestrianVehicleDetector(config)
-tracker = SORTTracker(config)  # Now using SORT tracker
+tracker = DepthAIObjectTracker(config)  # Using DepthAI's ObjectTracker node
 crossing_detector = LineCrossingDetector(config)
 logger = DetectionLogger(config)
 

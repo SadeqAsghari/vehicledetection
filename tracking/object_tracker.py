@@ -1,26 +1,8 @@
-# object_tracker.py - COMPLETELY REWRITTEN WITH SORT-BASED TRACKING
+# object_tracker.py - Using DepthAI's ObjectTracker node
 import numpy as np
 from collections import deque
 import time
-from scipy.optimize import linear_sum_assignment
-from filterpy.kalman import KalmanFilter
-
-def bbox_iou(boxA, boxB):
-    """Calculate Intersection over Union between two bounding boxes"""
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[2], boxB[2])
-    yB = min(boxA[3], boxB[3])
-    
-    interW = max(0, xB - xA)
-    interH = max(0, yB - yA)
-    interArea = interW * interH
-    
-    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-    
-    iou = interArea / float(boxAArea + boxBArea - interArea + 1e-5)
-    return iou
+import depthai as dai
 
 def get_centroid(bbox):
     """Get centroid of bounding box"""
@@ -28,82 +10,6 @@ def get_centroid(bbox):
     cx = int((x1 + x2) / 2)
     cy = int((y1 + y2) / 2)
     return (cx, cy)
-
-def convert_bbox_to_z(bbox):
-    """Convert [x1, y1, x2, y2] to [x, y, s, r] where x,y is center, s is scale, r is aspect ratio"""
-    w = bbox[2] - bbox[0]
-    h = bbox[3] - bbox[1]
-    x = bbox[0] + w/2.
-    y = bbox[1] + h/2.
-    s = w * h  # scale is area
-    r = w / float(h) if h > 0 else 1.0  # aspect ratio
-    return np.array([x, y, s, r]).reshape((4, 1))
-
-def convert_z_to_bbox(z):
-    """Convert [x, y, s, r] back to [x1, y1, x2, y2]"""
-    w = np.sqrt(z[2] * z[3])
-    h = z[2] / w
-    return np.array([z[0] - w/2., z[1] - h/2., z[0] + w/2., z[1] + h/2.]).flatten()
-
-class KalmanBoxTracker:
-    """Individual tracker using Kalman Filter for one object"""
-    count = 0
-    
-    def __init__(self, bbox, label):
-        # Initialize Kalman filter with constant velocity model
-        self.kf = KalmanFilter(dim_x=7, dim_z=4)
-        self.kf.F = np.array([[1,0,0,0,1,0,0],
-                              [0,1,0,0,0,1,0],
-                              [0,0,1,0,0,0,1],
-                              [0,0,0,1,0,0,0],
-                              [0,0,0,0,1,0,0],
-                              [0,0,0,0,0,1,0],
-                              [0,0,0,0,0,0,1]])
-        self.kf.H = np.array([[1,0,0,0,0,0,0],
-                              [0,1,0,0,0,0,0],
-                              [0,0,1,0,0,0,0],
-                              [0,0,0,1,0,0,0]])
-        
-        self.kf.R[2:, 2:] *= 10.  # Measurement noise
-        self.kf.P[4:, 4:] *= 1000.  # Initial uncertainty in velocity
-        self.kf.P *= 10.  # Initial uncertainty
-        self.kf.Q[-1, -1] *= 0.01  # Process noise
-        self.kf.Q[4:, 4:] *= 0.01
-        
-        self.kf.x[:4] = convert_bbox_to_z(bbox)
-        self.time_since_update = 0
-        self.id = KalmanBoxTracker.count
-        KalmanBoxTracker.count += 1
-        self.history = []
-        self.hits = 0
-        self.hit_streak = 0
-        self.age = 0
-        self.label = label
-        
-    def update(self, bbox):
-        """Update the state with observed bbox"""
-        self.time_since_update = 0
-        self.history = []
-        self.hits += 1
-        self.hit_streak += 1
-        self.kf.update(convert_bbox_to_z(bbox))
-        
-    def predict(self):
-        """Predict next state"""
-        if (self.kf.x[2] + self.kf.x[6]) <= 0:
-            self.kf.x[6] *= 0.0
-        self.kf.predict()
-        self.age += 1
-        
-        if self.time_since_update > 0:
-            self.hit_streak = 0
-        self.time_since_update += 1
-        self.history.append(convert_z_to_bbox(self.kf.x))
-        return self.history[-1]
-        
-    def get_state(self):
-        """Return current bbox estimate"""
-        return convert_z_to_bbox(self.kf.x).reshape((1, 4))[0]
 
 class TrackedObject:
     """Maintains compatibility with existing logging system"""
@@ -180,125 +86,63 @@ class TrackedObject:
         avg_speed = total_distance / (total_time / 3600)  # km/h
         return round(avg_speed, 2)
 
-class SORTTracker:
-    """SORT-based Multi-Object Tracker"""
-    def __init__(self, config, max_age=5, min_hits=3, iou_threshold=0.3):
+class DepthAIObjectTracker:
+    """Object Tracker using DepthAI's built-in ObjectTracker node"""
+    def __init__(self, config):
         self.config = config
-        self.max_age = max_age  # Max frames to keep alive without detection
-        self.min_hits = min_hits  # Min hits before track is confirmed
-        self.iou_threshold = iou_threshold
-        self.trackers = []
         self.tracked_objects = {}
         self.frame_count = 0
         self.total_detected = 0
+        self.next_id = 0
         
     def update(self, detections, timestamp):
-        """Update tracker with new detections"""
+        """Update tracker with new detections from DepthAI"""
         self.frame_count += 1
         
-        # Get predictions from existing trackers
-        trks = np.zeros((len(self.trackers), 5))
-        to_del = []
-        for t, trk in enumerate(trks):
-            pos = self.trackers[t].predict()[0]
-            trk[:4] = pos
-            trk[4] = 0
-            if np.any(np.isnan(pos)):
-                to_del.append(t)
-                
-        # Remove invalid trackers
-        for t in reversed(to_del):
-            self.trackers.pop(t)
-            
-        # Extract detection info
-        dets = []
-        det_labels = []
+        # Process detections and update tracked objects
+        current_ids = set()
+        
         for det in detections:
+            # Use track_id from detection if available, otherwise assign new ID
+            track_id = det.get('track_id', None)
+            
+            if track_id is None:
+                # Assign new ID for untracked detection
+                track_id = self.next_id
+                self.next_id += 1
+                
+            current_ids.add(track_id)
             bbox = det['bbox']
-            dets.append(bbox + [det.get('confidence', 0.9)])
-            det_labels.append(det['label'])
-            
-        dets = np.array(dets) if dets else np.empty((0, 5))
-        
-        # Associate detections to trackers
-        matched, unmatched_dets, unmatched_trks = self.associate_detections_to_trackers(
-            dets, trks, self.iou_threshold)
-        
-        # Update matched trackers
-        for m in matched:
-            self.trackers[m[1]].update(dets[m[0], :4])
-            
-        # Create new trackers for unmatched detections
-        for i in unmatched_dets:
-            label = det_labels[i] if i < len(det_labels) else 'unknown'
-            trk = KalmanBoxTracker(dets[i, :4], label)
-            self.trackers.append(trk)
-            self.total_detected += 1
-            
-        # Update tracked objects
-        i = len(self.trackers)
-        for trk in reversed(self.trackers):
-            d = trk.get_state()
+            label = det['label']
             
             # Update or create TrackedObject
-            if trk.id not in self.tracked_objects:
-                if trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits:
-                    obj = TrackedObject(trk.id, trk.label, d, timestamp)
-                    self.tracked_objects[trk.id] = obj
+            if track_id not in self.tracked_objects:
+                obj = TrackedObject(track_id, label, bbox, timestamp)
+                self.tracked_objects[track_id] = obj
+                self.total_detected += 1
             else:
-                self.tracked_objects[trk.id].update(d, timestamp)
-                
-            i -= 1
-            # Remove dead tracklets
-            if trk.time_since_update > self.max_age:
-                self.trackers.pop(i)
-                if trk.id in self.tracked_objects:
-                    del self.tracked_objects[trk.id]
+                self.tracked_objects[track_id].update(bbox, timestamp)
+        
+        # Remove stale tracked objects (not seen for multiple frames)
+        max_age = 30  # frames
+        stale_ids = []
+        for track_id, obj in self.tracked_objects.items():
+            if track_id not in current_ids:
+                age = self.frame_count - (obj.last_seen if hasattr(obj, 'last_frame') else 0)
+                if not hasattr(obj, 'last_frame'):
+                    obj.last_frame = self.frame_count
+                else:
+                    obj.last_frame = obj.last_frame if track_id not in current_ids else self.frame_count
+                    
+                if self.frame_count - obj.last_frame > max_age:
+                    stale_ids.append(track_id)
+            else:
+                obj.last_frame = self.frame_count
+                    
+        for track_id in stale_ids:
+            del self.tracked_objects[track_id]
                     
         return list(self.tracked_objects.values())
-        
-    def associate_detections_to_trackers(self, detections, trackers, iou_threshold):
-        """Associate detections to tracked objects using Hungarian algorithm"""
-        if len(trackers) == 0:
-            return np.empty((0, 2), dtype=int), np.arange(len(detections)), np.empty((0, 5), dtype=int)
-            
-        iou_matrix = np.zeros((len(detections), len(trackers)), dtype=np.float32)
-        
-        for d, det in enumerate(detections):
-            for t, trk in enumerate(trackers):
-                iou_matrix[d, t] = bbox_iou(det[:4], trk[:4])
-                
-        if min(iou_matrix.shape) > 0:
-            matched_indices = linear_sum_assignment(-iou_matrix)
-            matched_indices = np.array(list(zip(matched_indices[0], matched_indices[1])))
-        else:
-            matched_indices = np.empty(shape=(0, 2))
-            
-        unmatched_detections = []
-        for d in range(len(detections)):
-            if d not in matched_indices[:, 0]:
-                unmatched_detections.append(d)
-                
-        unmatched_trackers = []
-        for t in range(len(trackers)):
-            if t not in matched_indices[:, 1]:
-                unmatched_trackers.append(t)
-                
-        # Filter out matched with low IOU
-        matches = []
-        for m in matched_indices:
-            if iou_matrix[m[0], m[1]] < iou_threshold:
-                unmatched_detections.append(m[0])
-                unmatched_trackers.append(m[1])
-            else:
-                matches.append(m.reshape(1, 2))
-                
-        if len(matches) == 0:
-            matches = np.empty((0, 2), dtype=int)
-        else:
-            matches = np.concatenate(matches, axis=0)
-            
-        return matches, np.array(unmatched_detections), np.array(unmatched_trackers)
         
     def draw_debug_info(self, frame):
         """Draw debug information on frame"""
@@ -312,5 +156,6 @@ class SORTTracker:
             for i in range(1, len(obj.trail)):
                 cv2.line(frame, obj.trail[i - 1], obj.trail[i], (255, 0, 0), 2)
 
-# For backward compatibility, alias SORTTracker as ObjectTracker
-ObjectTracker = SORTTracker
+# For backward compatibility
+ObjectTracker = DepthAIObjectTracker
+SORTTracker = DepthAIObjectTracker

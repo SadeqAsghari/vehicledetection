@@ -8,8 +8,8 @@ class Config:
             7: 'truck'
         }
         
-        # Updated for YOLOv7-tiny 416x416
-        self.model_path = "models/yolov7-tiny_416x416.blob"
+        # Updated for YOLOv8n 416x416
+        self.model_path = "models/yolov8n_416x416.blob"
         
         self.pixel_to_cm_ratio = 1.0  # 1 px = 1 cm (needs calibration)
         
