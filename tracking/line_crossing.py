@@ -23,7 +23,18 @@ class LineCrossingDetector:
         return None
         
     def _intersects(self, a1, a2, b1, b2):
-        """Check if two line segments intersect"""
+        """Check if two line segments intersect using proper line segment intersection algorithm
+        
+        Args:
+            a1, a2: Points defining the first line segment (object trajectory)
+            b1, b2: Points defining the second line segment (crossing line)
+        
+        Returns:
+            True if the line segments intersect, False otherwise
+        """
         def ccw(A, B, C):
+            """Check if three points are in counter-clockwise order"""
             return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
+        
+        # Two line segments intersect if the endpoints of each segment are on opposite sides of the other segment
         return ccw(a1, b1, b2) != ccw(a2, b1, b2) and ccw(a1, a2, b1) != ccw(a1, a2, b2)
