@@ -37,7 +37,6 @@ class PedestrianVehicleDetector:
         self.xinFrame.out.link(self.detectionNetwork.input)
         self.detectionNetwork.passthrough.link(self.objectTracker.inputTrackerFrame)
         self.detectionNetwork.out.link(self.objectTracker.inputDetectionFrame)
-        self.detectionNetwork.passthrough.link(self.objectTracker.inputTrackerFrame)
         
         self.xoutTrack = self.pipeline.create(dai.node.XLinkOut)
         self.xoutTrack.setStreamName("tracklets")
